@@ -7,16 +7,17 @@ from os import path as ospath, listdir
 from pickle import load as pload
 from random import randrange
 from re import search as re_search
+from time import time
+from urllib.parse import parse_qs, urlparse
 from tenacity import (
     retry,
     wait_exponential,
     stop_after_attempt,
     retry_if_exception_type,
 )
-from urllib.parse import parse_qs, urlparse
 
-from bot import config_dict
-from bot.helper.ext_utils.links_utils import is_gdrive_id
+from ....core.config_manager import Config
+from ...ext_utils.links_utils import is_gdrive_id
 
 LOGGER = getLogger(__name__)
 getLogger("googleapiclient.discovery").setLevel(ERROR)
@@ -45,8 +46,7 @@ class GoogleDriveHelper:
         self.proc_bytes = 0
         self.total_time = 0
         self.status = None
-        self.update_interval = 3
-        self.use_sa = config_dict["USE_SERVICE_ACCOUNTS"]
+        self.use_sa = Config.USE_SERVICE_ACCOUNTS
 
     @property
     def speed(self):
@@ -59,7 +59,7 @@ class GoogleDriveHelper:
     def processed_bytes(self):
         return self.proc_bytes
 
-    async def progress(self):
+    def progress(self):
         if self.status is not None:
             chunk_size = (
                 self.status.total_size * self.status.progress()
@@ -67,7 +67,7 @@ class GoogleDriveHelper:
             )
             self.file_processed_bytes = self.status.total_size * self.status.progress()
             self.proc_bytes += chunk_size
-            self.total_time += self.update_interval
+        self.total_time = time() - self._start_time
 
     def authorize(self):
         credentials = None
@@ -89,7 +89,7 @@ class GoogleDriveHelper:
         authorized_http.http.disable_ssl_certificate_validation = True
         return build("drive", "v3", http=authorized_http, cache_discovery=False)
 
-    def switchServiceAccount(self):
+    def switch_service_account(self):
         if self.sa_index == self.sa_number - 1:
             self.sa_index = 0
         else:
@@ -98,7 +98,7 @@ class GoogleDriveHelper:
         LOGGER.info(f"Switching to {self.sa_index} index")
         self.service = self.authorize()
 
-    def getIdFromUrl(self, link, user_id=""):
+    def get_id_from_url(self, link, user_id=""):
         if user_id and link.startswith("mtp:"):
             self.use_sa = False
             self.token_path = f"tokens/{user_id}.pickle"
@@ -111,14 +111,15 @@ class GoogleDriveHelper:
             link = link.replace("tp:", "", 1)
         if is_gdrive_id(link):
             return link
-        if "folders" in link or "file" in link:
-            regex = r"https:\/\/drive\.google\.com\/(?:drive(.*?)\/folders\/|file(.*?)?\/d\/)([-\w]+)"
-            res = re_search(regex, link)
-            if res is None:
-                raise IndexError("G-Drive ID not found.")
-            return res.group(3)
+        if match := re_search(r"/d/([-\w]+)", link):
+            return match.group(1)
+        if match := re_search(r"/folders/([-\w]+)", link):
+            return match.group(1)
         parsed = urlparse(link)
-        return parse_qs(parsed.query)["id"][0]
+        qs = parse_qs(parsed.query)
+        if "id" in qs:
+            return qs["id"][0]
+        raise IndexError("G-Drive ID not found.")
 
     @retry(
         wait=wait_exponential(multiplier=2, min=3, max=6),
@@ -143,7 +144,7 @@ class GoogleDriveHelper:
         stop=stop_after_attempt(3),
         retry=retry_if_exception_type(Exception),
     )
-    def getFileMetadata(self, file_id):
+    def get_file_metadata(self, file_id):
         return (
             self.service.files()
             .get(
@@ -159,7 +160,7 @@ class GoogleDriveHelper:
         stop=stop_after_attempt(3),
         retry=retry_if_exception_type(Exception),
     )
-    def getFilesByFolderId(self, folder_id, item_type=""):
+    def get_files_by_folder_id(self, folder_id, item_type=""):
         page_token = None
         files = []
         if not item_type:
@@ -208,7 +209,7 @@ class GoogleDriveHelper:
             .execute()
         )
         file_id = file.get("id")
-        if not config_dict["IS_TEAM_DRIVE"]:
+        if not Config.IS_TEAM_DRIVE:
             self.set_permission(file_id)
         LOGGER.info(f'Created G-Drive Folder:\nName: {file.get("name")}\nID: {file_id}')
         return file_id
@@ -240,17 +241,17 @@ class GoogleDriveHelper:
     """
 
     async def cancel_task(self):
-        self.listener.isCancelled = True
+        self.listener.is_cancelled = True
         if self.is_downloading:
             LOGGER.info(f"Cancelling Download: {self.listener.name}")
-            await self.listener.onDownloadError("Download stopped by user!")
+            await self.listener.on_download_error("Stopped by user!")
         elif self.is_cloning:
             LOGGER.info(f"Cancelling Clone: {self.listener.name}")
-            await self.listener.onUploadError(
+            await self.listener.on_upload_error(
                 "your clone has been stopped and cloned data has been deleted!"
             )
         elif self.is_uploading:
             LOGGER.info(f"Cancelling Upload: {self.listener.name}")
-            await self.listener.onUploadError(
+            await self.listener.on_upload_error(
                 "your upload has been stopped and uploaded data has been deleted!"
             )

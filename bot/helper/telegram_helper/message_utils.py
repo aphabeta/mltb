@@ -1,83 +1,83 @@
 from asyncio import sleep
-from pyrogram.errors import FloodWait
+from pyrogram.errors import FloodWait, FloodPremiumWait
 from re import match as re_match
 from time import time
 
-from bot import config_dict, LOGGER, status_dict, task_dict_lock, Intervals, bot, user
-from bot.helper.ext_utils.bot_utils import setInterval
-from bot.helper.ext_utils.exceptions import TgLinkException
-from bot.helper.ext_utils.status_utils import get_readable_message
+from ... import LOGGER, status_dict, task_dict_lock, intervals, DOWNLOAD_DIR
+from ...core.config_manager import Config
+from ...core.telegram_manager import TgClient
+from ..ext_utils.bot_utils import SetInterval
+from ..ext_utils.exceptions import TgLinkException
+from ..ext_utils.status_utils import get_readable_message
 
 
-async def sendMessage(message, text, buttons=None, block=True):
+async def send_message(message, text, buttons=None, block=True):
     try:
         return await message.reply(
             text=text,
-            quote=True,
-            disable_web_page_preview=True,
             disable_notification=True,
             reply_markup=buttons,
         )
     except FloodWait as f:
         LOGGER.warning(str(f))
-        if block:
-            await sleep(f.value * 1.2)
-            return await sendMessage(message, text, buttons)
-        return str(f)
+        if not block:
+            return str(f)
+        await sleep(f.value * 1.2)
+        return await send_message(message, text, buttons, block)
     except Exception as e:
         LOGGER.error(str(e))
         return str(e)
 
 
-async def editMessage(message, text, buttons=None, block=True):
+async def edit_message(message, text, buttons=None, block=True):
     try:
-        await message.edit(
-            text=text, disable_web_page_preview=True, reply_markup=buttons
+        return await message.edit(
+            text=text,
+            reply_markup=buttons,
         )
     except FloodWait as f:
         LOGGER.warning(str(f))
-        if block:
-            await sleep(f.value * 1.2)
-            return await editMessage(message, text, buttons)
-        return str(f)
+        if not block:
+            return str(f)
+        await sleep(f.value * 1.2)
+        return await edit_message(message, text, buttons, block)
     except Exception as e:
         LOGGER.error(str(e))
         return str(e)
 
 
-async def sendFile(message, file, caption=None):
+async def send_file(message, file, caption=""):
     try:
         return await message.reply_document(
-            document=file, quote=True, caption=caption, disable_notification=True
+            document=file, caption=caption, disable_notification=True
         )
     except FloodWait as f:
         LOGGER.warning(str(f))
         await sleep(f.value * 1.2)
-        return await sendFile(message, file, caption)
+        return await send_file(message, file, caption)
     except Exception as e:
         LOGGER.error(str(e))
         return str(e)
 
 
-async def sendRss(text):
+async def send_rss(text, chat_id, thread_id):
     try:
-        app = user or bot
-        return await app.send_message(
-            chat_id=config_dict["RSS_CHAT"],
+        return await TgClient.bot.send_message(
+            chat_id=chat_id,
             text=text,
-            disable_web_page_preview=True,
+            message_thread_id=thread_id,
             disable_notification=True,
         )
-    except FloodWait as f:
+    except (FloodWait, FloodPremiumWait) as f:
         LOGGER.warning(str(f))
         await sleep(f.value * 1.2)
-        return await sendRss(text)
+        return await send_rss(text, chat_id, thread_id)
     except Exception as e:
         LOGGER.error(str(e))
         return str(e)
 
 
-async def deleteMessage(message):
+async def delete_message(message):
     try:
         await message.delete()
     except Exception as e:
@@ -87,16 +87,16 @@ async def deleteMessage(message):
 async def auto_delete_message(cmd_message=None, bot_message=None):
     await sleep(60)
     if cmd_message is not None:
-        await deleteMessage(cmd_message)
+        await delete_message(cmd_message)
     if bot_message is not None:
-        await deleteMessage(bot_message)
+        await delete_message(bot_message)
 
 
 async def delete_status():
     async with task_dict_lock:
         for key, data in list(status_dict.items()):
             try:
-                await deleteMessage(data["message"])
+                await delete_message(data["message"])
                 del status_dict[key]
             except Exception as e:
                 LOGGER.error(str(e))
@@ -108,16 +108,18 @@ async def get_tg_link_message(link):
     if link.startswith("https://t.me/"):
         private = False
         msg = re_match(
-            r"https:\/\/t\.me\/(?:c\/)?([^\/]+)(?:\/[^\/]+)?\/([0-9-]+)", link
+            r"https:\/\/t\.me\/(?:c\/)?([^\/]+)\/(?:\d+\/)*([0-9-]+)",
+            link,
         )
     else:
         private = True
         msg = re_match(
             r"tg:\/\/openmessage\?user_id=([0-9]+)&message_id=([0-9-]+)", link
         )
-        if not user:
+        if not TgClient.user:
             raise TgLinkException("USER_SESSION_STRING required for this private link!")
-
+    if not msg:
+        raise TgLinkException("Wrong link format!")
     chat = msg[1]
     msg_id = msg[2]
     if "-" in msg_id:
@@ -145,35 +147,46 @@ async def get_tg_link_message(link):
 
     if not private:
         try:
-            message = await bot.get_messages(chat_id=chat, message_ids=msg_id)
+            message = await TgClient.bot.get_messages(chat_id=chat, message_ids=msg_id)
             if message.empty:
                 private = True
         except Exception as e:
             private = True
-            if not user:
+            if not TgClient.user:
                 raise e
 
     if not private:
         return (links, "bot") if links else (message, "bot")
-    elif user:
+    elif TgClient.user:
         try:
-            user_message = await user.get_messages(chat_id=chat, message_ids=msg_id)
+            user_message = await TgClient.user.get_messages(
+                chat_id=chat, message_ids=msg_id
+            )
         except Exception as e:
             raise TgLinkException(
                 f"You don't have access to this chat!. ERROR: {e}"
             ) from e
         if not user_message.empty:
             return (links, "user") if links else (user_message, "user")
+        else:
+            raise TgLinkException("Private: Can't get this message!")
     else:
-        raise TgLinkException("Private: Please report!")
+        raise TgLinkException("Private: Can't get this message!")
+
+
+async def temp_download(msg):
+    path = f"{DOWNLOAD_DIR}temp"
+    return await msg.download(file_name=f"{path}/")
 
 
 async def update_status_message(sid, force=False):
+    if intervals["stopAll"]:
+        return
     async with task_dict_lock:
         if not status_dict.get(sid):
-            if obj := Intervals["status"].get(sid):
+            if obj := intervals["status"].get(sid):
                 obj.cancel()
-                del Intervals["status"][sid]
+                del intervals["status"][sid]
             return
         if not force and time() - status_dict[sid]["time"] < 3:
             return
@@ -187,20 +200,20 @@ async def update_status_message(sid, force=False):
         )
         if text is None:
             del status_dict[sid]
-            if obj := Intervals["status"].get(sid):
+            if obj := intervals["status"].get(sid):
                 obj.cancel()
-                del Intervals["status"][sid]
+                del intervals["status"][sid]
             return
         if text != status_dict[sid]["message"].text:
-            message = await editMessage(
+            message = await edit_message(
                 status_dict[sid]["message"], text, buttons, block=False
             )
             if isinstance(message, str):
-                if message.startswith("Telegram says: [400"):
+                if message.startswith("Telegram says: [40"):
                     del status_dict[sid]
-                    if obj := Intervals["status"].get(sid):
+                    if obj := intervals["status"].get(sid):
                         obj.cancel()
-                        del Intervals["status"][sid]
+                        del intervals["status"][sid]
                 else:
                     LOGGER.error(
                         f"Status with id: {sid} haven't been updated. Error: {message}"
@@ -210,11 +223,13 @@ async def update_status_message(sid, force=False):
             status_dict[sid]["time"] = time()
 
 
-async def sendStatusMessage(msg, user_id=0):
+async def send_status_message(msg, user_id=0):
+    if intervals["stopAll"]:
+        return
+    sid = user_id or msg.chat.id
+    is_user = bool(user_id)
     async with task_dict_lock:
-        sid = user_id or msg.chat.id
-        is_user = bool(user_id)
-        if sid in list(status_dict.keys()):
+        if sid in status_dict:
             page_no = status_dict[sid]["page_no"]
             status = status_dict[sid]["status"]
             page_step = status_dict[sid]["page_step"]
@@ -223,25 +238,25 @@ async def sendStatusMessage(msg, user_id=0):
             )
             if text is None:
                 del status_dict[sid]
-                if obj := Intervals["status"].get(sid):
+                if obj := intervals["status"].get(sid):
                     obj.cancel()
-                    del Intervals["status"][sid]
+                    del intervals["status"][sid]
                 return
-            message = status_dict[sid]["message"]
-            await deleteMessage(message)
-            message = await sendMessage(msg, text, buttons, block=False)
+            old_message = status_dict[sid]["message"]
+            message = await send_message(msg, text, buttons, block=False)
             if isinstance(message, str):
                 LOGGER.error(
                     f"Status with id: {sid} haven't been sent. Error: {message}"
                 )
                 return
+            await delete_message(old_message)
             message.text = text
             status_dict[sid].update({"message": message, "time": time()})
         else:
             text, buttons = await get_readable_message(sid, is_user)
             if text is None:
                 return
-            message = await sendMessage(msg, text, buttons, block=False)
+            message = await send_message(msg, text, buttons, block=False)
             if isinstance(message, str):
                 LOGGER.error(
                     f"Status with id: {sid} haven't been sent. Error: {message}"
@@ -256,7 +271,7 @@ async def sendStatusMessage(msg, user_id=0):
                 "status": "All",
                 "is_user": is_user,
             }
-    if not Intervals["status"].get(sid) and not is_user:
-        Intervals["status"][sid] = setInterval(
-            config_dict["STATUS_UPDATE_INTERVAL"], update_status_message, sid
-        )
+        if not intervals["status"].get(sid) and not is_user:
+            intervals["status"][sid] = SetInterval(
+                Config.STATUS_UPDATE_INTERVAL, update_status_message, sid
+            )
