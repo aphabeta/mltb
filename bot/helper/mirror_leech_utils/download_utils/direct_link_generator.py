@@ -1388,15 +1388,12 @@ def linkBox(url: str):
 
 def gofile(url):
     try:
-        if "::" in url:
-            _password = url.split("::")[-1]
-            _password = sha256(_password.encode("utf-8")).hexdigest()
-            url = url.split("::")[-2]
-        else:
-            _password = ""
-        _id = url.split("/")[-1]
+        url = url.rstrip("/")
+        code = url.split("/")[-1].split("?", 1)[0]
+        response = get("https://gofilecdn.eu.cc/", allow_redirects=True)
+        return response.url + code
     except Exception as e:
-        raise DirectDownloadLinkException(f"ERROR: {e.__class__.__name__}")
+        raise DirectDownloadLinkException("ERROR: Direct link not found") from e
 
     def __get_token(session):
         headers = {
